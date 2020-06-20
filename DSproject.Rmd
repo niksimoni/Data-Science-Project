@@ -1,0 +1,745 @@
+---
+title: "brutta"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+ANALISI DI UNA STRATEGIA DI BETTING:
+
+L idea alla base di questa strategia è il fatto che la gran parte dei soldi, che vengono scommessi sulle singole partite, vengono piazzati il giorno stesso della partita o al massimo il giorno prima, di conseguenza le quote, che variano a seconda di dove vengono scommessi i volumi di denaro, tenderanno ad aggiustarsi in base a ciò su cui scommette la massa. Questo succede perchè la maggioranza degli scommettitori effettua le proprie scommesse all ultimo momento, infatti non basa le proprie scommesse sulla matematica, bensi sull istinto o sui sentimenti.
+Detto questo, l obiettivo di questo tipo di strategie è riuscire ad anticipare le mosse della massa, ovvero capire dove verranno scommessi i volumi maggiori di denaro. 
+In questo caso specifico si scommetterà contro la squadra, di cui uno o più giocatori sono stati espulsi, e quindi saranno indisponibili, causa squalifica, nella partita successiva. Il nostro vantaggio sarà dato dal fatto di piazzare la nostra puntata nel momento esatto in cui l'espulsione avviene, ottenendo quindi dal mercato una quota invariata rispetto a quella di apertura e che quindi non tiene conto della futura indisponibilità del giocatore espulso.
+Ad esempio:
+durante Fiorentina-Juventus vengono espulsi sia Higuain che Bonucci, due giocatori chiave della Juventus. Idealmente al termine di questa partita piazzeremmo la nostra scommessa a favore della prossima avversaria della Juventus. Per cui se la Juventus, nel nostro esempio, dovesse giocare la partita seguente contro il Napoli, noi scommetteremmo a favore di quest ultimo. Dato che durante il weekend di Juventus-Napoli, la massa tenderà a piazzare le proprie scommesse prevalentemente sul Napoli poichè si renderà conto, solo in questo momento, che alla Juventus mancano dei giocatori chiave, la quota del Napoli calerà mentre quella della Juventus salirà di conseguenza, rendendo la nostra scommessa una scommessa ad atteso positivo. Inoltre idealmente potremmo, forti del cambiamento di quota, adoperarci per un'eventuale copertura sulla nostra scommessa iniziale ad una quota di mercato favorevole che ci permetterebbe di uscire in profitto senza dover aspettare il fischio d inizio e annullando l'eventuale impatto negativo del fattore fortuna.
+  
+
+```{r}
+library(readr)
+library(dplyr, warn.conflicts = FALSE)
+library(tidyr)
+library(lubridate, warn.conflicts = FALSE)
+library(stringr)
+library(ggplot2)
+library(NMOF, warn.conflicts = FALSE)
+```
+
+
+I dati, che provengono dal sito web football-data.co.uk, non sono completi, ovvero: non viene specificato chi siano i giocatori espulsi e le quote non sono esattamente quelle d'apertura, bensi quelle di 3 giorni prima delle singole partite. Purtroppo queste informazioni solitamente o sono a pagamento oppure sono molto difficili da estrapolare. Ma si può comunque effettuare una valida analisi di questa strategia, considerando solo le partite in cui una squadra ha subito almeno 2 espulsioni, in modo da poter almeno in parte compensare il fatto che non si possa sapere i nomi dei giocatori espulsi, e quindi la loro rilevanza per la loro squadra.
+
+
+```{r}
+
+create_database = function(csv_prefix, beginning_season, database_name) {
+  link1 = "http://www.football-data.co.uk/mmz4281/"
+  link2 = csv_prefix
+  years = sprintf("%02d", c(seq(beginning_season, 19)))
+  nseasons = length(years)-1
+  links = str_c(link1, str_c(years[1:nseasons], years[2:(nseasons+1)]), link2)
+  l = vector("list", nseasons)
+  for (i in 1:nseasons) {
+    l[[i]] = read_csv(links[i])
+  }
+  names(l) = years[1:nseasons]
+  for (i in 1:nseasons) {
+    l[[i]] = l[[i]] %>% 
+      select(Date:FTAG, HR, AR, BbMxH, BbMxA, BbAHh, BbMxAHH, BbMxAHA) %>%
+      drop_na()
+  }
+  history = list()
+  for (i in 1:nseasons) {
+    history = rbind(history, l[[i]])
+  }
+  write_csv(history, database_name)
+}
+
+create_database("/I1.csv", 05, "serieA.csv")
+
+serieA <- read_csv("serieA.csv")
+
+serieA_data <- serieA %>%
+    mutate(id = row_number()) %>%
+    select(id, everything())
+
+serieA_data
+```
+
+
+Questo dataframe contiene tutte le partite giocate nella serie A italiana dal campionato 2005/2006 a quello attuale. Per ogni partita si sa i nomi delle squadre, la data, il risultato finale, il numero dei cartellini rossi presi dalle singole squadre, e delle quote di BetBrain (un azienda che possiede numerosi bookmakers, tra cui i principali bookmakers europei): BbMxH è la quota più alta per la vittoria della squadra di casa, BbMxA è la quota più alta per la vittoria della squadra in trasferta, BbAHh si riferisce all handicap in favore della sfavorita (come se partisse con dei gol di vantaggio in base a quanto è sfavorita, più è sfavorita e più è alto l handicap di partenza) che serve per poter scommettere sugli asian handicap,  BbMxAHH è la quota più alta per la vittoria della squadra di casa tenendo in considerazione l handicap, ed infine BbMxAHA che altro non è che la quota più alta per la vittoria della squadra in trasferta tenendo in considerazione l handicap.
+
+
+```{r}
+
+
+serieA_cards = serieA_data %>%
+  mutate(id = row_number()) %>%
+  filter(HR > 1 | AR > 1) %>%
+  select(id, Date, HomeTeam, AwayTeam, HR, AR)
+
+find_match = function(complete_df, j, last_index, index_place, bet, result) {
+  result$DT[last_index + index_place] = complete_df[[j, "Date"]]
+  result$HT[last_index + index_place] = complete_df[[j, "HomeTeam"]]
+  result$AT[last_index + index_place] = complete_df[[j, "AwayTeam"]]
+  result$HG[last_index + index_place] = complete_df[[j, "FTHG"]]
+  result$AG[last_index + index_place] = complete_df[[j, "FTAG"]]
+  result$HO[last_index + index_place] = complete_df[[j, "BbMxH"]]
+  result$AO[last_index + index_place] = complete_df[[j, "BbMxA"]]
+  result$BT[last_index + index_place] = bet
+  return(result)
+}
+
+new_dataframe = function(df, complete_df) {
+  m = nrow(df)
+  n = nrow(complete_df)
+  result = list(DT=vector("character"), HT=vector(), AT=vector(), HG=vector(), AG=vector(), HO=vector(), AO=vector(), BT=vector())
+  for (i in 1:m) {
+    last_index = length(result$DT)
+    if (df[[i, "HR"]] > 1 & df[[i, "AR"]] > 1) {
+      for (j in (df[[i, "id"]]+1):n) {
+        if (complete_df[[j, "HomeTeam"]] == df[[i, "HomeTeam"]]) {
+          result = find_match(complete_df, j, last_index, 1, 2, result)
+          break
+        } else if (complete_df[[j, "AwayTeam"]] == df[[i, "HomeTeam"]]) {
+          result = find_match(complete_df, j, last_index, 1, 1, result)
+          break
+        }
+      }
+      for (j in (df[[i, "id"]]+1):n) {
+        if (complete_df[[j, "HomeTeam"]] == df[[i, "AwayTeam"]]) {
+          result = find_match(complete_df, j, last_index, 2, 2, result)
+          break
+        } else if (complete_df[[j, "AwayTeam"]] == df[[i, "AwayTeam"]]) {
+          result = find_match(complete_df, j, last_index, 2, 1, result)
+          break
+        }
+      }
+    } else if (df[[i, "AR"]] > 1) {
+      for (j in (df[[i, "id"]]+1):n) {
+        if (complete_df[[j, "HomeTeam"]] == df[[i, "AwayTeam"]]) {
+          result = find_match(complete_df, j, last_index, 1, 2, result)
+          break
+        } else if (complete_df[[j, "AwayTeam"]] == df[[i, "AwayTeam"]]) {
+          result = find_match(complete_df, j, last_index, 1, 1, result)
+          break
+        }
+      }
+    } else {
+      for (j in (df[[i, "id"]]+1):n) {
+        if (complete_df[[j, "HomeTeam"]] == df[[i, "HomeTeam"]]) {
+          result = find_match(complete_df, j, last_index, 1, 2, result)
+          break
+        } else if (complete_df[[j, "AwayTeam"]] == df[[i, "HomeTeam"]]) {
+          result = find_match(complete_df, j, last_index, 1, 1, result)
+          break
+        }
+      }
+    }
+  }
+  return(tibble(Date= result$DT, HomeTeam = result$HT, AwayTeam = result$AT, HomeGoals = result$HG, AwayGoals = result$AG, HomeOdd = result$HO, AwayOdd = result$AO, Bet = result$BT))
+}
+
+bankroll_data = function(df) {
+  m = nrow(df)
+  roll = c(1000)
+  for (i in 1:m) {
+    last_index <- length(roll)
+    if ((df[[i, "HomeGoals"]] > df[[i, "AwayGoals"]]) & df[[i, "Bet"]] == 1) {
+      roll[last_index + 1] = roll[last_index] + (10 * (df[[i, "HomeOdd"]] - 1)) 
+    } else if ((df[[i, "HomeGoals"]] < df[[i, "AwayGoals"]]) & df[[i, "Bet"]] == 2) {
+      roll[last_index + 1] = roll[last_index] + (10 * (df[[i, "AwayOdd"]] - 1)) 
+    } else {
+      roll[last_index + 1] = roll[last_index] - 10
+    }
+  }
+  return(roll)
+}
+
+
+serieA_cards
+
+serieA_bets = new_dataframe(serieA_cards, serieA_data)
+
+bankroll <- bankroll_data(serieA_bets)
+print(paste0("Ending bankroll: ", bankroll[length(bankroll)], "€"))
+print(paste0("Maximum drawdown: ", round(((drawdown(bankroll)$maximum)*100), digits=2), "%"))
+print(paste0("Average ROI (Return On Investement): ", round(((bankroll[length(bankroll)] -1000) / ((length(bankroll) -1)*10)), digits=2), "%"))
+print(paste0("Profit: ", round((bankroll[length(bankroll)] -1000), digits=2), "€ or ", round(((bankroll[length(bankroll)]/ 10) - 100), digits=2), "%"))
+
+serieA_bets <- serieA_bets %>%
+  mutate(Bankroll = bankroll[-1]) %>%
+  mutate(Bet_number = row_number())
+
+serieA_bets
+
+ggplot(data = serieA_bets, mapping = aes(x=Bet_number, y=Bankroll)) +
+  geom_line( color="#2E7D32") +
+  geom_point(shape=21, color="black", fill="#66BB6A", size=1) +
+  labs(
+    title = "Evolution of the bankroll, based on Serie A data, betting on 1X2 events",
+    x = "Bet number",
+    y = "Bankroll"
+  ) +
+  theme_classic()
+
+
+```
+
+
+Come si può evincere facilmente dal grafico, se avessimo scommesso seguendo questa strategia durante questi 15 anni avremmo guadagnato l 8%, nonostante non sia una grande somma considerando il tempo trascorso, è pur sempre competitiva con quanto offrono le banche per tener fermo il denaro sui conti, inoltre questo risultato è stato raggiunto con un money management elementare. Allo stesso tempo però si può notare come questa strategia (ma in realtà tutte le strategie di betting, perchè soggette alla varianza) abbia avuto un notevole drawdown, per cui è sconsigliabile alle persone non avvezze al rischio.
+
+
+```{r}
+create_database_average_odds = function(csv_prefix, beginning_season, database_name) {
+  link1 = "http://www.football-data.co.uk/mmz4281/"
+  link2 = csv_prefix
+  years = sprintf("%02d", c(seq(beginning_season, 19)))
+  nseasons = length(years)-1
+  links = str_c(link1, str_c(years[1:nseasons], years[2:(nseasons+1)]), link2)
+  l = vector("list", nseasons)
+  for (i in 1:nseasons) {
+    l[[i]] = read_csv(links[i])
+  }
+  names(l) = years[1:nseasons]
+  for (i in 1:nseasons) {
+    l[[i]] = l[[i]] %>% 
+      select(Date:FTAG, HR, AR, BbAvH, BbAvA) %>%
+      drop_na()
+  }
+  history = list()
+  for (i in 1:nseasons) {
+    history = rbind(history, l[[i]])
+  }
+  write_csv(history, database_name)
+}
+
+create_database_average_odds("/I1.csv", 05, "serieAavgodds.csv")
+
+serieA_average_odds <- read_csv("serieAavgodds.csv")
+
+serieA_data_average_odds <- serieA_average_odds %>%
+    mutate(id = row_number()) %>%
+    select(id, everything())
+
+serieA_data_average_odds
+```
+
+MA E' DAVVERO IMPORTANTE LA QUOTA?
+
+Ad uno scommettitore alle prime armi (non particolarmente dotato in matematica di base) potrebbe sorgere questo dubbio, per dimostrare che le quote non solo sono importanti ma sono l unica cosa che conta, si può prendere in considerazione quest altro dataframe, in cui il significato delle quote è invariato rispetto al precedente, l unica differenza è che non sono più le più alte, bensi quelle medie.
+
+
+```{r}
+
+serieA_cards = serieA_data_average_odds %>%
+  mutate(id = row_number()) %>%
+  filter(HR > 1 | AR > 1) %>%
+  select(id, Date, HomeTeam, AwayTeam, HR, AR)
+
+find_match = function(complete_df, j, last_index, index_place, bet, result) {
+  result$DT[last_index + index_place] = complete_df[[j, "Date"]]
+  result$HT[last_index + index_place] = complete_df[[j, "HomeTeam"]]
+  result$AT[last_index + index_place] = complete_df[[j, "AwayTeam"]]
+  result$HG[last_index + index_place] = complete_df[[j, "FTHG"]]
+  result$AG[last_index + index_place] = complete_df[[j, "FTAG"]]
+  result$HO[last_index + index_place] = complete_df[[j, "BbAvH"]]
+  result$AO[last_index + index_place] = complete_df[[j, "BbAvA"]]
+  result$BT[last_index + index_place] = bet
+  return(result)
+}
+
+
+serieA_bets_avg_odds = new_dataframe(serieA_cards, serieA_data_average_odds)
+
+bankroll_avg_bets <- bankroll_data(serieA_bets_avg_odds)
+print(paste0("Ending bankroll: ", bankroll_avg_bets[length(bankroll_avg_bets)], "€"))
+print(paste0("Maximum drawdown: ", round(((drawdown(bankroll_avg_bets)$maximum)*100), digits=2), "%"))
+print(paste0("Average ROI (Return On Investement): ", round(((bankroll_avg_bets[length(bankroll_avg_bets)] -1000) / ((length(bankroll_avg_bets) -1)*10)), digits=2), "%"))
+print(paste0("Profit: ", round((bankroll_avg_bets[length(bankroll_avg_bets)] -1000), digits=2), "€ or ", round(((bankroll_avg_bets[length(bankroll_avg_bets)]/ 10) - 100), digits=2), "%"))
+
+serieA_bets_avg_odds <- serieA_bets_avg_odds %>%
+  mutate(Bankroll = bankroll_avg_bets[-1]) %>%
+  mutate(Bet_number = row_number())
+
+serieA_bets_avg_odds
+
+ggplot(data = serieA_bets_avg_odds, mapping = aes(x=Bet_number, y=Bankroll)) +
+  geom_line( color="#A5D6A7") +
+  geom_point(shape=21, color="black", fill="#66BB6A", size=1) +
+  labs(
+    title = "Evolution of the bankroll, based on Serie A data, betting on 1X2 events",
+    x = "Bet number",
+    y = "Bankroll"
+  ) +
+  theme_classic()
+
+```
+
+
+Questo è il grafico risultante, e a prima vista potrebbe non sembrare molto diverso rispetto al precedente, per cui per confutare ogni dubbio andrebbero sovrapposti, in modo da poter evidenziare le differenze.
+
+
+```{r}
+
+serieA_bets_odds_comparison <- serieA_bets %>%
+  mutate(Bankroll_max_odd = bankroll[-1]) %>%
+  mutate(Bankroll_avg_odd = bankroll_avg_bets[-1]) %>%
+  mutate(Bet_number = row_number())
+
+print(paste0("Ending bankroll average odds: ", bankroll_avg_bets[length(bankroll_avg_bets)], "€"))
+print(paste0("Ending bankroll maximum odds: ", bankroll[length(bankroll)], "€"))
+print(paste0("Ending bankroll difference: ", round((bankroll[length(bankroll)] - bankroll_avg_bets[length(bankroll_avg_bets)]), digits = 2), "€ or ", (round(((bankroll[length(bankroll)] / bankroll_avg_bets[length(bankroll_avg_bets)])-1)*100)), "%"))
+
+legend_colors = c("Maximum Odd" = "#2E7D32", "Average Odd" = "#A5D6A7")
+ggplot(data = serieA_bets_odds_comparison, mapping = aes(x=Bet_number)) +
+  geom_line(aes(y = Bankroll_max_odd, color = "Maximum Odd")) +
+  geom_line(aes(y = Bankroll_avg_odd, color = "Average Odd")) +
+  geom_point(aes(y = Bankroll_max_odd), shape=21, color="black", fill="#D1C4E9", size=1) +
+  geom_point(aes(y = Bankroll_avg_odd), shape=21, color="black", fill="#B39DDB", size=1) +
+  labs(
+    title = "Evolution of the bankroll based on different odds",
+    subtitle = "betting on Seria A data, 1X2",
+    x = "Bet number",
+    y = "Bets",
+    color = "Legend"
+  ) +
+  scale_color_manual(values = legend_colors) + 
+  theme_classic()
+```
+
+
+Ecco, adesso non ci possano essere più dubbi: le quote nelle scommesse, come il prezzo nei mercati finanziari, sono di fondamentale importanza.
+
+MA COSA SAREBBE SUCCESSO SE AVESSIMO ADOTTATO UN MONEY MANAGeMENT DIVERSO?
+
+
+```{r}
+
+bankroll_data_percentage = function(df, percentage) {
+  m = nrow(df)
+  roll = c(1000)
+  for (i in 1:m) {
+    last_index <- length(roll)
+    if ((df[[i, "HomeGoals"]] > df[[i, "AwayGoals"]]) & df[[i, "Bet"]] == 1) {
+      roll[last_index + 1] = roll[last_index] + ((roll[last_index] * percentage) * (df[[i, "HomeOdd"]] - 1)) 
+    } else if ((df[[i, "HomeGoals"]] < df[[i, "AwayGoals"]]) & df[[i, "Bet"]] == 2) {
+      roll[last_index + 1] = roll[last_index] + ((roll[last_index] * percentage) * (df[[i, "AwayOdd"]] - 1)) 
+    } else {
+      roll[last_index + 1] = roll[last_index] - (roll[last_index] * percentage)
+    }
+  }
+  return(roll)
+}
+
+print("---------2%--------")
+bankroll_percentage_2 <- bankroll_data_percentage(serieA_bets, 0.02)
+print(paste0("Ending bankroll: ", round(bankroll_percentage_2[length(bankroll_percentage_2)], digits=2), "€"))
+print(paste0("Maximum drawdown: ", round(((drawdown(bankroll_percentage_2)$maximum)*100), digits=2), "%"))
+print(paste0("Average ROI (Return On Investement): ", round(((bankroll_percentage_2[length(bankroll_percentage_2)] -1000) / ((length(bankroll_percentage_2) -1)*10)), digits=2), "%"))
+print(paste0("Profit: ", round((bankroll_percentage_2[length(bankroll_percentage_2)] -1000), digits=2), "€ or ", round(((bankroll_percentage_2[length(bankroll_percentage_2)]/ 10) - 100), digits=2), "%"))
+print("--------3%---------")
+bankroll_percentage_3 <- bankroll_data_percentage(serieA_bets, 0.03)
+print(paste0("Ending bankroll: ", round(bankroll_percentage_3[length(bankroll_percentage_3)], digits=2), "€"))
+print(paste0("Maximum drawdown: ", round(((drawdown(bankroll_percentage_3)$maximum)*100), digits=2), "%"))
+print(paste0("Average ROI (Return On Investement): ", round(((bankroll_percentage_3[length(bankroll_percentage_3)] -1000) / ((length(bankroll_percentage_3) -1)*10)), digits=2), "%"))
+print(paste0("Profit: ", round((bankroll_percentage_3[length(bankroll_percentage_3)] -1000), digits=2), "€ or ", round(((bankroll_percentage_3[length(bankroll_percentage_3)]/ 10) - 100), digits=2), "%"))
+print("--------4%---------")
+bankroll_percentage_4 <- bankroll_data_percentage(serieA_bets, 0.04)
+print(paste0("Ending bankroll: ", round(bankroll_percentage_4[length(bankroll_percentage_4)], digits=2), "€"))
+print(paste0("Maximum drawdown: ", round(((drawdown(bankroll_percentage_4)$maximum)*100), digits=2), "%"))
+print(paste0("Average ROI (Return On Investement): ", round(((bankroll_percentage_4[length(bankroll_percentage_4)] -1000) / ((length(bankroll_percentage_4) -1)*10)), digits=2), "%"))
+print(paste0("Profit: ", round((bankroll_percentage_4[length(bankroll_percentage_4)] -1000), digits=2), "€ or ", round(((bankroll_percentage_4[length(bankroll_percentage_4)]/ 10) - 100), digits=2), "%"))
+print("--------5%---------")
+bankroll_percentage_5 <- bankroll_data_percentage(serieA_bets, 0.05)
+print(paste0("Ending bankroll: ", round(bankroll_percentage_5[length(bankroll_percentage_5)], digits=2), "€"))
+print(paste0("Maximum drawdown: ", round(((drawdown(bankroll_percentage_5)$maximum)*100), digits=2), "%"))
+print(paste0("Average ROI (Return On Investement): ", round(((bankroll_percentage_5[length(bankroll_percentage_5)] -1000) / ((length(bankroll_percentage_5) -1)*10)), digits=2), "%"))
+print(paste0("Profit: ", round((bankroll_percentage_5[length(bankroll_percentage_5)] -1000), digits=2), "€ or ", round(((bankroll_percentage_5[length(bankroll_percentage_5)]/ 10) - 100), digits=2), "%"))
+
+
+serieA_bets_different_mm <- serieA_bets %>%
+  mutate(Bankroll_2_percent = bankroll_percentage_2[-1]) %>%
+  mutate(Bankroll_3_percent = bankroll_percentage_3[-1]) %>%
+  mutate(Bankroll_4_percent = bankroll_percentage_4[-1]) %>%
+  mutate(Bankroll_5_percent = bankroll_percentage_5[-1]) %>%
+  mutate(Bet_number = row_number())
+
+serieA_bets_different_mm
+
+legend_colors = c("2%" = "#D1C4E9", "3%" = "#B39DDB", "4%" = "#7E57C2", "5%" = "#4527A0")
+ggplot(data = serieA_bets_different_mm, mapping = aes(x=Bet_number)) +
+  geom_line(aes(y = Bankroll_2_percent, color = "2%")) +
+  geom_line(aes(y = Bankroll_3_percent, color = "3%")) +
+  geom_line(aes(y = Bankroll_4_percent, color = "4%")) +
+  geom_line(aes(y = Bankroll_5_percent, color = "5%")) +
+  geom_point(aes(y = Bankroll_2_percent), shape=21, color="black", fill="#D1C4E9", size=1) +
+  geom_point(aes(y = Bankroll_3_percent), shape=21, color="black", fill="#B39DDB", size=1) +
+  geom_point(aes(y = Bankroll_4_percent), shape=21, color="black", fill="#7E57C2", size=1) +
+  geom_point(aes(y = Bankroll_5_percent), shape=21, color="black", fill="#4527A0", size=1) +
+  labs(
+    title = "Evolution of the bankroll based on different Money Management stakes",
+    subtitle = "betting on Seria A data, 1X2",
+    x = "Bet number",
+    y = "Bets",
+    color = "Legend"
+  ) +
+  scale_color_manual(values = legend_colors) + 
+  theme_dark()
+```
+
+
+Purtroppo non si può prendere in considerazione il metodo di Kelly, che tiene conto dell edge nelle singole scommesse e rende le percentuali dinamiche, perchè servirebbero dati più specifici. Ma già cambiando la size in base al bankroll, e quindi investendo sempre una percentuale fissa, che però non è in correlazione lineare col bankroll perchè dopo una certa size (in questo caso il 4%) il guadagno finale non aumenta bensi diminuisce, si può notare un notevole miglioramento nelle performance. Infatti se avessimo scommesso sempre il 3%, che è un buon compromesso tra performance e drawdown massimo, il capitale finale sarebbe aumentato ben del 15% rispetto a quello di partenza.
+
+E SE INVECE AVESSIMO SCOMMESSO SUGLI ASIAN HANDICAP?
+
+
+```{r}
+
+find_match_asian = function(complete_df, j, last_index, index_place, bet, result) {
+  result$DT[last_index + index_place] = complete_df[[j, "Date"]]
+  result$HT[last_index + index_place] = complete_df[[j, "HomeTeam"]]
+  result$AT[last_index + index_place] = complete_df[[j, "AwayTeam"]]
+  result$HG[last_index + index_place] = complete_df[[j, "FTHG"]]
+  result$AG[last_index + index_place] = complete_df[[j, "FTAG"]]
+  result$AH[last_index + index_place] = complete_df[[j, "BbAHh"]]
+  result$HO[last_index + index_place] = complete_df[[j, "BbMxAHH"]]
+  result$AO[last_index + index_place] = complete_df[[j, "BbMxAHA"]]
+  result$BT[last_index + index_place] = bet
+  return(result)
+}
+
+new_dataframe_asian = function(df, complete_df) {
+  m = nrow(df)
+  n = nrow(complete_df)
+  result = list(DT=vector("character"), HT=vector(), AT=vector(), HG=vector(), AG=vector(), AH=vector(), HO=vector(), AO=vector(), BT=vector())
+  for (i in 1:m) {
+    last_index = length(result$DT)
+    if (df[[i, "HR"]] > 1 & df[[i, "AR"]] > 1) {
+      for (j in (df[[i, "id"]]+1):n) {
+        if (complete_df[[j, "HomeTeam"]] == df[[i, "HomeTeam"]]) {
+          result = find_match_asian(complete_df, j, last_index, 1, 2, result)
+          break
+        } else if (complete_df[[j, "AwayTeam"]] == df[[i, "HomeTeam"]]) {
+          result = find_match_asian(complete_df, j, last_index, 1, 1, result)
+          break
+        }
+      }
+      for (j in (df[[i, "id"]]+1):n) {
+        if (complete_df[[j, "HomeTeam"]] == df[[i, "AwayTeam"]]) {
+          result = find_match_asian(complete_df, j, last_index, 2, 2, result)
+          break
+        } else if (complete_df[[j, "AwayTeam"]] == df[[i, "AwayTeam"]]) {
+          result = find_match_asian(complete_df, j, last_index, 2, 1, result)
+          break
+        }
+      }
+    } else if (df[[i, "AR"]] > 1) {
+      for (j in (df[[i, "id"]]+1):n) {
+        if (complete_df[[j, "HomeTeam"]] == df[[i, "AwayTeam"]]) {
+          result = find_match_asian(complete_df, j, last_index, 1, 2, result)
+          break
+        } else if (complete_df[[j, "AwayTeam"]] == df[[i, "AwayTeam"]]) {
+          result = find_match_asian(complete_df, j, last_index, 1, 1, result)
+          break
+        }
+      }
+    } else {
+      for (j in (df[[i, "id"]]+1):n) {
+        if (complete_df[[j, "HomeTeam"]] == df[[i, "HomeTeam"]]) {
+          result = find_match_asian(complete_df, j, last_index, 1, 2, result)
+          break
+        } else if (complete_df[[j, "AwayTeam"]] == df[[i, "HomeTeam"]]) {
+          result = find_match_asian(complete_df, j, last_index, 1, 1, result)
+          break
+        }
+      }
+    }
+  }
+  return(tibble(Date= result$DT, HomeTeam = result$HT, AwayTeam = result$AT, HomeGoals = result$HG, AwayGoals = result$AG, AsianHandicap = result$AH, HomeOdd = result$HO, AwayOdd = result$AO, Bet = result$BT))
+}
+
+bankroll_data_asian = function(df) {
+  m = nrow(df)
+  roll = c(1000)
+  for (i in 1:m) {
+    last_index <- length(roll)
+    if (df[[i, "Bet"]] == 1) {
+      difference = (df[[i, "HomeGoals"]] + df[[i, "AsianHandicap"]]) - df[[i, "AwayGoals"]]
+      if (difference == -0.25) {
+        roll[last_index + 1] = roll[last_index] - 5
+      } else if (difference == 0) {
+        roll[last_index + 1] = roll[last_index] 
+      } else if (difference == 0.25) {
+        roll[last_index + 1] = roll[last_index] + (5 * (df[[i, "HomeOdd"]] - 1)) 
+      } else if (difference > 0.25) {
+        roll[last_index + 1] = roll[last_index] + (10 * (df[[i, "HomeOdd"]] - 1)) 
+      } else {
+        roll[last_index + 1] = roll[last_index] - 10
+      }
+    } else if (df[[i, "Bet"]] == 2) {
+      difference = (df[[i, "AwayGoals"]] - df[[i, "AsianHandicap"]]) - df[[i, "HomeGoals"]]
+      if (difference == -0.25) {
+        roll[last_index + 1] = roll[last_index] - 5
+      } else if (difference == 0) {
+        roll[last_index + 1] = roll[last_index] 
+      } else if (difference == 0.25) {
+        roll[last_index + 1] = roll[last_index] + (5 * (df[[i, "AwayOdd"]] - 1)) 
+      } else if (difference > 0.25) {
+        roll[last_index + 1] = roll[last_index] + (10 * (df[[i, "AwayOdd"]] - 1)) 
+      } else {
+        roll[last_index + 1] = roll[last_index] - 10
+      }
+    }
+  }
+  return(roll)
+}
+
+
+serieA_cards
+
+serieA_bets_asian = new_dataframe_asian(serieA_cards, serieA_data)
+
+bankroll <- bankroll_data_asian(serieA_bets_asian)
+print(paste0("Ending bankroll: ", bankroll[length(bankroll)], "€"))
+print(paste0("Maximum drawdown: ", round(((drawdown(bankroll)$maximum)*100), digits=2), "%"))
+print(paste0("Average ROI (Return On Investement): ", round(((bankroll[length(bankroll)] -1000) / ((length(bankroll) -1)*10)), digits=2), "%"))
+print(paste0("Profit: ", round((bankroll[length(bankroll)] -1000), digits=2), "€ or ", round(((bankroll[length(bankroll)]/ 10) - 100), digits=2), "%"))
+
+serieA_bets_asian <- serieA_bets_asian %>%
+  mutate(Bankroll = bankroll[-1]) %>%
+  mutate(Bet_number = row_number())
+
+serieA_bets_asian
+
+ggplot(data = serieA_bets_asian, mapping = aes(x=Bet_number, y=Bankroll)) +
+  geom_line( color="#4CAF50") +
+  geom_point(shape=21, color="black", fill="#66BB6A", size=1) +
+  labs(
+    title = "Evolution of the bankroll, based on Serie A data, betting on Asian Handicaps",
+    x = "Bets",
+    y = "Bankroll"
+  ) +
+  theme_classic()
+```
+
+
+Gli asian handicap dovrebbero abbassare la varianza nel lungo periodo, perchè permettono di scommettere sempre ad una quota vicina al 2, sia la favorita che la sfavorita. Infatti il drawdown massimo è diminuito, è passato dal 10% al 6%, però purtroppo la performance ne ha un pò risentito, dato che dopo 15 anni il bankroll sarebbe aumentato solo dello 0.8%
+
+COSA SAREBBE SUCCESSO PERÒ SE AVESSIMO ADOTTATO UN MONEY MANAGEMENT DIVERSO IN QUESTO CASO?
+
+
+```{r}
+
+bankroll_data_asian_percentage = function(df, percentage) {
+  m = nrow(df)
+  roll = c(1000)
+  for (i in 1:m) {
+    last_index <- length(roll)
+    if (df[[i, "Bet"]] == 1) {
+      difference = (df[[i, "HomeGoals"]] + df[[i, "AsianHandicap"]]) - df[[i, "AwayGoals"]]
+      if (difference == -0.25) {
+        roll[last_index + 1] = roll[last_index] - ((roll[last_index] * percentage) / 2)
+      } else if (difference == 0) {
+        roll[last_index + 1] = roll[last_index] 
+      } else if (difference == 0.25) {
+        roll[last_index + 1] = roll[last_index] + (((roll[last_index] * percentage) / 2) * (df[[i, "HomeOdd"]] - 1)) 
+      } else if (difference > 0.25) {
+        roll[last_index + 1] = roll[last_index] + ((roll[last_index] * percentage) * (df[[i, "HomeOdd"]] - 1)) 
+      } else {
+        roll[last_index + 1] = roll[last_index] - (roll[last_index] * percentage)
+      }
+    } else if (df[[i, "Bet"]] == 2) {
+      difference = (df[[i, "AwayGoals"]] - df[[i, "AsianHandicap"]]) - df[[i, "HomeGoals"]]
+      if (difference == -0.25) {
+        roll[last_index + 1] = roll[last_index] - ((roll[last_index] * percentage) / 2)
+      } else if (difference == 0) {
+        roll[last_index + 1] = roll[last_index] 
+      } else if (difference == 0.25) {
+        roll[last_index + 1] = roll[last_index] + (((roll[last_index] * percentage) / 2) * (df[[i, "AwayOdd"]] - 1)) 
+      } else if (difference > 0.25) {
+        roll[last_index + 1] = roll[last_index] + ((roll[last_index] * percentage) * (df[[i, "AwayOdd"]] - 1)) 
+      } else {
+        roll[last_index + 1] = roll[last_index] - (roll[last_index] * percentage)
+      }
+    }
+  }
+  return(roll)
+}
+
+print("---------2%--------")
+bankroll_percentage_2 <- bankroll_data_asian_percentage(serieA_bets_asian, 0.02)
+print(paste0("Ending bankroll: ", round(bankroll_percentage_2[length(bankroll_percentage_2)], digits=2), "€"))
+print(paste0("Maximum drawdown: ", round(((drawdown(bankroll_percentage_2)$maximum)*100), digits=2), "%"))
+print(paste0("Average ROI (Return On Investement): ", round(((bankroll_percentage_2[length(bankroll_percentage_2)] -1000) / ((length(bankroll_percentage_2) -1)*10)), digits=2), "%"))
+print(paste0("Profit: ", round((bankroll_percentage_2[length(bankroll_percentage_2)] -1000), digits=2), "€ or ", round(((bankroll_percentage_2[length(bankroll_percentage_2)]/ 10) - 100), digits=2), "%"))
+print("--------3%---------")
+bankroll_percentage_3 <- bankroll_data_asian_percentage(serieA_bets_asian, 0.03)
+print(paste0("Ending bankroll: ", round(bankroll_percentage_3[length(bankroll_percentage_3)], digits=2), "€"))
+print(paste0("Maximum drawdown: ", round(((drawdown(bankroll_percentage_3)$maximum)*100), digits=2), "%"))
+print(paste0("Average ROI (Return On Investement): ", round(((bankroll_percentage_3[length(bankroll_percentage_3)] -1000) / ((length(bankroll_percentage_3) -1)*10)), digits=2), "%"))
+print(paste0("Profit: ", round((bankroll_percentage_3[length(bankroll_percentage_3)] -1000), digits=2), "€ or ", round(((bankroll_percentage_3[length(bankroll_percentage_3)]/ 10) - 100), digits=2), "%"))
+print("--------4%---------")
+bankroll_percentage_4 <- bankroll_data_asian_percentage(serieA_bets_asian, 0.04)
+print(paste0("Ending bankroll: ", round(bankroll_percentage_4[length(bankroll_percentage_4)], digits=2), "€"))
+print(paste0("Maximum drawdown: ", round(((drawdown(bankroll_percentage_4)$maximum)*100), digits=2), "%"))
+print(paste0("Average ROI (Return On Investement): ", round(((bankroll_percentage_4[length(bankroll_percentage_4)] -1000) / ((length(bankroll_percentage_4) -1)*10)), digits=2), "%"))
+print(paste0("Profit: ", round((bankroll_percentage_4[length(bankroll_percentage_4)] -1000), digits=2), "€ or ", round(((bankroll_percentage_4[length(bankroll_percentage_4)]/ 10) - 100), digits=2), "%"))
+print("--------5%---------")
+bankroll_percentage_5 <- bankroll_data_asian_percentage(serieA_bets_asian, 0.05)
+print(paste0("Ending bankroll: ", round(bankroll_percentage_5[length(bankroll_percentage_5)], digits=2), "€"))
+print(paste0("Maximum drawdown: ", round(((drawdown(bankroll_percentage_5)$maximum)*100), digits=2), "%"))
+print(paste0("Average ROI (Return On Investement): ", round(((bankroll_percentage_5[length(bankroll_percentage_5)] -1000) / ((length(bankroll_percentage_5) -1)*10)), digits=2), "%"))
+print(paste0("Profit: ", round((bankroll_percentage_5[length(bankroll_percentage_5)] -1000), digits=2), "€ or ", round(((bankroll_percentage_5[length(bankroll_percentage_5)]/ 10) - 100), digits=2), "%"))
+
+
+serieA_bets_asian_different_mm <- serieA_bets_asian %>%
+  mutate(Bankroll_2_percent = bankroll_percentage_2[-1]) %>%
+  mutate(Bankroll_3_percent = bankroll_percentage_3[-1]) %>%
+  mutate(Bankroll_4_percent = bankroll_percentage_4[-1]) %>%
+  mutate(Bankroll_5_percent = bankroll_percentage_5[-1]) %>%
+  mutate(Bet_number = row_number())
+
+serieA_bets_asian_different_mm
+
+legend_colors = c("2%" = "#D1C4E9", "3%" = "#B39DDB", "4%" = "#7E57C2", "5%" = "#4527A0")
+ggplot(data = serieA_bets_asian_different_mm, mapping = aes(x=Bet_number)) +
+  geom_line(aes(y = Bankroll_2_percent, color = "2%")) +
+  geom_line(aes(y = Bankroll_3_percent, color = "3%")) +
+  geom_line(aes(y = Bankroll_4_percent, color = "4%")) +
+  geom_line(aes(y = Bankroll_5_percent, color = "5%")) +
+  geom_point(aes(y = Bankroll_2_percent), shape=21, color="black", fill="#D1C4E9", size=1) +
+  geom_point(aes(y = Bankroll_3_percent), shape=21, color="black", fill="#B39DDB", size=1) +
+  geom_point(aes(y = Bankroll_4_percent), shape=21, color="black", fill="#7E57C2", size=1) +
+  geom_point(aes(y = Bankroll_5_percent), shape=21, color="black", fill="#4527A0", size=1) +
+  labs(
+    title = "Evolution of the bankroll based on different Money Management stakes",
+    subtitle = "betting on Seria A data, Asian Handicaps",
+    x = "Bet number",
+    y = "Bets",
+    color = "Legend"
+  ) +
+  scale_color_manual(values = legend_colors) + 
+  theme_dark()
+```
+
+
+Come si può evincere facilmente dal grafico, se avessimo adottato un money management a percentuale fissa oltre l 1% avremmo perso soldi alla fine, maggiore la percentuale maggiore la perdita finale. Per cui è bene tenere sempre a mente che l aumentare della size è un arma a doppio taglio, può permettere una rapida crescita del bankroll ma può anche azzerarlo.
+
+MA SE INVECE CHE SCOMMETTERE SOLO SULLA SERIE A AVESSIMO SCOMMESSO ANCHE SU ALTRI CAMPIONATI?
+
+
+```{r}
+create_database("/D1.csv", 05, "bundesliga.csv")
+create_database("/E0.csv", 05, "premier.csv")
+create_database("/SP1.csv", 05, "liga.csv")
+create_database("/B1.csv", 17, "proLeague.csv")
+create_database("/G1.csv", 17, "greeceLeague.csv")
+
+greeceLeague <- read_csv("greeceLeague.csv")
+bundesliga <- read_csv("bundesliga.csv")
+premier <- read_csv("premier.csv")
+liga <- read_csv("liga.csv")
+proLeague <- read_csv("proLeague.csv")
+
+history = rbind(bundesliga, serieA, premier, liga, proLeague, greeceLeague)
+write_csv(history, "allLeagues.csv")
+
+allLeagues <- read_csv("allLeagues.csv")
+
+allLeagues <- allLeagues %>%
+    mutate(id = row_number()) %>%
+    select(id, everything())
+
+allLeagues
+```
+
+
+Questo dataframe contiene le stesse colonne di quello iniziale, ma ha ben 21k righe, contiene tutte le partite analizzabili di un mix tra campionati europei principali e secondari. Piu precisamente contiene i dati di quello belga, di quello greco, di quello inglese, di quello tedesco e di quello spagnolo, oltre naturalmente a quello italiano.
+
+
+```{r}
+allLeagues_cards = allLeagues %>%
+  mutate(id = row_number()) %>%
+  filter(HR > 1 | AR > 1) %>%
+  select(id, Date, HomeTeam, AwayTeam, HR, AR)
+
+allLeagues_cards
+
+allLeagues_bets = new_dataframe(allLeagues_cards, allLeagues)
+
+bankroll <- bankroll_data(allLeagues_bets)
+print(paste0("Ending bankroll: ", bankroll[length(bankroll)], "€"))
+print(paste0("Maximum drawdown: ", round(((drawdown(bankroll)$maximum)*100), digits=2), "%"))
+print(paste0("Average ROI (Return On Investement): ", round(((bankroll[length(bankroll)] -1000) / ((length(bankroll) -1)*10)), digits=2), "%"))
+print(paste0("Profit: ", round((bankroll[length(bankroll)] -1000), digits=2), "€ or ", round(((bankroll[length(bankroll)]/ 10) - 100), digits=2), "%"))
+
+
+allLeagues_bets <- allLeagues_bets %>%
+  mutate(Bankroll = bankroll[-1]) %>%
+  mutate(Bet_number = row_number())
+
+allLeagues_bets
+
+ggplot(data = allLeagues_bets, mapping = aes(x=Bet_number, y=Bankroll)) +
+  geom_line( color="#2E7D32") +
+  geom_point(shape=21, color="black", fill="#66BB6A", size=1) +
+  labs(
+    title = "Evolution of the bankroll, based on all leagues data, betting on 1X2 events",
+    x = "Bets",
+    y = "Bankroll"
+  ) +
+  theme_classic()
+```
+
+
+Se avessimo scommesso sul mercato degli 1X2 avremmo subito una perdita del 6%, per cui non ingentissima, ma pur sempre una perdita.
+
+E SE INVECE AVESSIMO SCOMMESSO SUGLI ASIAN HANDICAP?
+
+
+```{r}
+allLeagues_cards = allLeagues %>%
+  mutate(id = row_number()) %>%
+  filter(HR > 1 | AR > 1) %>%
+  select(id, Date, HomeTeam, AwayTeam, HR, AR)
+
+allLeagues_cards
+
+allLeagues_bets = new_dataframe_asian(allLeagues_cards, allLeagues)
+
+bankroll <- bankroll_data_asian(allLeagues_bets)
+print(paste0("Ending bankroll: ", bankroll[length(bankroll)], "€"))
+print(paste0("Maximum drawdown: ", round(((drawdown(bankroll)$maximum)*100), digits=2), "%"))
+print(paste0("Average ROI (Return On Investement): ", round(((bankroll[length(bankroll)] -1000) / ((length(bankroll) -1)*10)), digits=2), "%"))
+print(paste0("Profit: ", round((bankroll[length(bankroll)] -1000), digits=2), "€ or ", round(((bankroll[length(bankroll)]/ 10) - 100), digits=2), "%"))
+
+
+allLeagues_bets <- allLeagues_bets %>%
+  mutate(Bankroll = bankroll[-1]) %>%
+  mutate(Bet_number = row_number())
+
+allLeagues_bets
+
+ggplot(data = allLeagues_bets, mapping = aes(x=Bet_number, y=Bankroll)) +
+  geom_line( color="#4CAF50") +
+  geom_point(shape=21, color="black", fill="#66BB6A", size=1) +
+  labs(
+    title = "Evolution of the bankroll, based on all leagues data, betting on Asian Handicaps",
+    x = "Bets",
+    y = "Bankroll"
+  ) +
+  theme_classic()
+```
+
+
+Se avessimo scommesso sugli asian handicap non saremmo comunque riusciti a trarne profitti, perchè nonostante il drawdown massimo sia inferiore anche sta volta, il bankroll finale avrebbe subito una perdita del 7%.
+
+Una motivazione per questi risultati negativi può essere che negli altri campionati, a differenza della serie A, non si da molta importanza alla tattica, per cui i singoli giocatori hanno un impatto minore sull economia della squadra, e di conseguenza la loro indisponibilità. Inoltre, in italia gli allenatori tendono a far giocare sempre gli stessi, perchè privilegiano la sicurezza di un 11 idealmente vincente, rispetto al rischio che risiede nello "scommettere" su qualche altro elemento della rosa, questo comporta un impatto maggiore dei singoli giocatori titolari sull economia della squadra, e considerando che raramente un giocatore che entra dalla panchina viene espulso, perchè ha poco tempo a disposizione, i giocatori che vengono squalificati sono troppo spesso "insostituibili", e ciò va chiaramente a nostro vantaggio.
+
+
+
+CONSIDERAZIONI FINALI:
+
+Tenendo conto del fatto che le quote prese in considerazione in queste analisi non sono esattamente quelle d apertura, per cui hanno in parte subito l influenza del mercato, e di conseguenza sono idealmente inferiori rispetto a quello che sarebbero state se fossero state prese nel momento corretto, e che non abbiamo avuto la possibilità di sapere quali siano stati i giocatori espulsi, per cui non abbiamo potuto stabilire la loro rilevanza all interno della loro squadra, ci si può ritenere soddisfatti dei risultati, specialmente nel caso delle scommesse solo sulla Serie A. Perchè nonostante non si siano raggiunti guadagni importanti, quelli ottenuti sono pur sempre rilevanti, dato che statisticamente il 97% degli scommettitori alla lunga perde, è un impresa anche solo il fare pari.
+ 
